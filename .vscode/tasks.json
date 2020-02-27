@@ -1,0 +1,48 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "shell",
+      "label": "Create dev build",
+      "command": "cl.exe",
+      "args": [
+        "/Zi",
+        "/EHsc",
+        "/MD",
+        "/DWIN32",
+        "/IC:\\Users\\rene\\Documents\\Coding\\Video_Codec_SDK_9.1.23\\include\\",
+        "/IC:\\Users\\rene\\Documents\\Coding\\Video_Codec_SDK_9.1.23\\Samples\\NvCodec\\",
+        "/IC:\\Users\\rene\\Documents\\Coding\\quiche-master\\include\\",
+        // Intermediate debug library (.pdb)
+        "/Fd:",
+        "${workspaceFolder}\\int\\",
+        // Intermediate products (.obj)
+        "/Fo:",
+        "${workspaceFolder}\\int\\",
+        // Binary output.
+        "/Fe:",
+        "${workspaceFolder}\\bin\\headless-dev.exe",
+        // File inputs.
+        "${workspaceFolder}\\src\\*.cpp",
+        // nvenc dependencies
+        "C:\\Users\\rene\\Documents\\Coding\\Video_Codec_SDK_9.1.23\\Samples\\NvCodec\\NvEncoder\\NvEncoderD3D11.cpp",
+        "C:\\Users\\rene\\Documents\\Coding\\Video_Codec_SDK_9.1.23\\Samples\\NvCodec\\NvEncoder\\NvEncoder.cpp",
+        "C:\\Users\\rene\\Documents\\Coding\\Video_Codec_SDK_9.1.23\\Lib\\x64\\nvencodeapi.lib",
+        // quiche (QUIC implementation)
+        "C:\\Users\\rene\\Documents\\Coding\\quiche-master\\target\\debug\\quiche.lib",
+        "advapi32.lib",
+        "userenv.lib",
+        "crypt32.lib",
+        // directx / dxgi
+        "d3d11.lib",
+        "dxgi.lib",
+        // win sockets
+        "ws2_32.lib"
+      ],
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": "build"
+    }
+  ]
+}
