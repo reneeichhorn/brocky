@@ -176,7 +176,7 @@ bool WindowsCapturer::initialize() {
   return true;
 }
 
-void WindowsCapturer::captureFrame() {
+std::vector<std::vector<uint8_t>>* WindowsCapturer::captureFrame() {
   // Start measuring execution time.
   auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -199,20 +199,20 @@ void WindowsCapturer::captureFrame() {
   hr = pDDA->AcquireNextFrame(INFINITE, &frameInfo, &pResource);
   if (FAILED(hr) && hr != DXGI_ERROR_WAIT_TIMEOUT) {
     printf("Failed to capture next frame.. (error code: %X)\n", hr);
-    return;
+    return nullptr;
   }
   auto captureTimeEnd = std::chrono::high_resolution_clock::now();
 
   // No updates neeeded.
   if (frameInfo.AccumulatedFrames == 0 || frameInfo.LastPresentTime.QuadPart == 0) {
     statsSkipped++;
-    return;
+    return nullptr;
   }
   
   // can this happen??
   if (!pResource) {
     printf("Unexpected error, output resource is still empty\n");
-    return;
+    return nullptr;
   }
 
   // Query for D3DTexture resource.
@@ -222,7 +222,7 @@ void WindowsCapturer::captureFrame() {
   );
   if (FAILED(hr)) {
     printf("Failed to get d3d texture from dxgi resource\n");
-    return;
+    return nullptr;
   }
 
   // Request new frame from encoder and copy over captured content.
@@ -263,6 +263,8 @@ void WindowsCapturer::captureFrame() {
   }
   statsTotal += total;
   statsPackets += localEncodedBuffer.size();
+  
+  return &localEncodedBuffer;
 }
 
 void WindowsCapturer::debugLastFrame() {

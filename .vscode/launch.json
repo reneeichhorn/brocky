@@ -12,8 +12,13 @@
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
-      "environment": [],
-      "externalConsole": false,
+      "environment": [
+        {
+          "name": "RUST_LOG",
+          "value": "trace"
+        }
+      ],
+      "externalConsole": true,
       "preLaunchTask": "Create dev build"
     }
   ]

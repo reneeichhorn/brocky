@@ -9,6 +9,10 @@ void QUICServer::cleanup() {
   }
 }
 
+static void debug_log(const char *line, void *argp) {
+  //fprintf(stderr, "[QUICHE DEBUG] %s\n", line);
+}
+
 bool QUICServer::initialize() {
   // Initialize winsock
 	if (WSAStartup(MAKEWORD(2,2), &pWSA) != 0) {
@@ -42,6 +46,7 @@ bool QUICServer::initialize() {
   }
 
   // Initialize quiche config
+  quiche_enable_debug_logging(debug_log, NULL);
   pConfig = quiche_config_new(QUICHE_PROTOCOL_VERSION);
   if (!pConfig) {
     printf("Failed to create quiche configuration\n");
@@ -49,7 +54,19 @@ bool QUICServer::initialize() {
   }
 
   // Apply configuration.
+  quiche_config_load_cert_chain_from_pem_file(pConfig, "certs/cert.crt");
+  quiche_config_load_priv_key_from_pem_file(pConfig, "certs/cert.key");
+  quiche_config_set_application_protos(pConfig,
+    (uint8_t *) "\x05hq-27\x05hq-25\x05hq-24\x05hq-23\x08http/0.9", 21);
   quiche_config_set_max_packet_size(pConfig, MAX_DATAGRAM_SIZE);
+  quiche_config_enable_early_data(pConfig);
+  quiche_config_verify_peer(pConfig, false);
+  quiche_config_set_max_packet_size(pConfig, MAX_DATAGRAM_SIZE);
+  quiche_config_set_initial_max_data(pConfig, 0x0FFFFFFFFFFFFFFF);
+  quiche_config_set_initial_max_stream_data_bidi_local(pConfig, 0x0FFFFFFFFFFFFFFF);
+  quiche_config_set_initial_max_stream_data_bidi_remote(pConfig, 0x0FFFFFFFFFFFFFFF);
+  quiche_config_set_initial_max_streams_bidi(pConfig, 0x0FFFFFFFFFFFFFFF);
+  quiche_config_set_cc_algorithm(pConfig, QUICHE_CC_RENO);
 
   return true;
 }
@@ -116,14 +133,32 @@ void QUICServer::tick(std::vector<std::vector<uint8_t>>* frameData) {
     auto ref = iter->second.quiche_ref;
     auto isEstablished = quiche_conn_is_established(ref);
     auto isEarlyStage = quiche_conn_is_in_early_data(ref);
-    if (!isEstablished && !isEarlyStage) {
+    auto isClosed = quiche_conn_is_closed(ref);
+    if (isEstablished || isEarlyStage) {
+      uint64_t id = 0;
+
+      // Check for readable packets. 
+      quiche_stream_iter *readable = quiche_conn_readable(ref);
+
+      while (quiche_stream_iter_next(readable, &id)) {
+        bool finish = false;
+        size_t recv_len = quiche_conn_stream_recv(ref, id, (uint8_t*)pBuffer, sizeof(pBuffer), &finish);
+        //printf("[QUIC] Got reable stream (size: %zd, fin: %s)\n", recv_len, finish ? "true" : "false");
+      }
+      quiche_stream_iter_free(readable);
+
       // Force quiche to create sliced QUIC packets.
       quiche_stream_iter *writeable = quiche_conn_writable(ref);
-      uint64_t id = 0;
 
       while (quiche_stream_iter_next(writeable, &id)) {
         bool finish = false;
-        size_t recv_len = quiche_conn_stream_send(ref, id, pSendBuffer, sizeof(pSendBuffer), &finish);
+        size_t amount = 0;
+        for (auto chunkIter = frameData->begin(); chunkIter != frameData->end(); chunkIter++) {
+          size_t recv_len = quiche_conn_stream_send(ref, id, chunkIter->data(), chunkIter->size(), false);
+          amount += chunkIter->size();
+          //printf("[QUIC] Creating QUIC packet for frame data (size: %zd)\n", recv_len);
+        }
+        printf("[QUIC] Sent %zd frame chunks with a total of %zd bytes to client %d\n", frameData->size(), amount, id);
       }
       quiche_stream_iter_free(writeable);
     }
@@ -140,7 +175,7 @@ void QUICServer::tick(std::vector<std::vector<uint8_t>>* frameData) {
                            &iter->second.addr,
                             sizeof(iter->second.addr));
       
-      printf("[QUIC] Sending QUIC packet over UDP (size: %d; actual: %d)\n", written, sent);
+      //printf("[QUIC] Sending QUIC packet over UDP (size: %d; actual: %d)\n", written, sent);
     }
   }
 
@@ -158,10 +193,10 @@ void QUICServer::tick(std::vector<std::vector<uint8_t>>* frameData) {
       return;
     }
 
-		printf("Failed to read from socket (error code: %d)\n", WSAGetLastError());
+		printf("[UDP] Failed to read from socket (error code: %d)\n", WSAGetLastError());
   }
 
-  printf("[Socket] UDP message received (length: %d)\n", recvLength);
+  //printf("[Socket] UDP message received (length: %d)\n", recvLength);
 
   // Get header from quic raw data.
   uint8_t type;
@@ -183,63 +218,44 @@ void QUICServer::tick(std::vector<std::vector<uint8_t>>* frameData) {
                               &type, scid, &scid_len, dcid, &dcid_len,
                               token, &token_len);
 
+  // Check if client is already registered
+  auto clientKey = hexStr((char*)dcid, dcid_len);
+  auto client = clientRefs.find(clientKey);
 
   // Client has not sent a token yet -> therefore assume its a new client.
-  if (token_len == 0) {
+  if (client == clientRefs.end() && token_len == 0) {
     this->negotiateVersion(version);
     this->createToken(scid, scid_len, dcid, dcid_len, &peer_addr, peer_addr_len, token, &token_len);
     printf("[QUIC] Retry packet with new token generated (token: %s)\n", hexStr((char *)token, token_len).c_str());
-  }
-
-  // Validate token.
-  if (!validate_mint_token(token, token_len, &peer_addr, peer_addr_len, odcid, &odcid_len)) {
-    printf("[QUIC] Client sent invalid token ??? whyyyy\n");
+    printf("[QUIC] ODCID when retry was sent: %s\n", hexStr((char *)odcid, odcid_len).c_str());
     return;
   }
 
   // Create new client if not yet happened.
-  auto clientKey = hexStr((char*)dcid, dcid_len);
-  auto client = clientRefs.find(clientKey);
   if (client == clientRefs.end()) {
+    // Validate token.
+    if (!validate_mint_token(token, token_len, &peer_addr, peer_addr_len, odcid, &odcid_len)) {
+      printf("[QUIC] Client sent invalid token ??? whyyyy\n");
+      return;
+    }
+    printf("[QUIC] ODCID after validating: %s\n", hexStr((char *)odcid, odcid_len).c_str());
+    printf("[QUIC] ODCID when accepting: %s\n", hexStr((char *)odcid, odcid_len).c_str());
+    printf("[QUIC] Token when accepting: %s\n", hexStr((char *)token, token_len).c_str());
     auto ref = quiche_accept(dcid, dcid_len, odcid, odcid_len, pConfig);
 
-    ClientRef client;
-    client.quiche_ref = ref;
-    memcpy(client.dcid, dcid, dcid_len);
-    memcpy(&client.addr, (void*)&peer_addr, peer_addr_len);
+    ClientRef newClient;
+    newClient.quiche_ref = ref;
+    memcpy(newClient.dcid, dcid, dcid_len);
+    memcpy(&newClient.addr, (void*)&peer_addr, peer_addr_len);
 
-    clientRefs.insert(std::pair<std::string, ClientRef>(clientKey, client));
+    clientRefs.insert(std::pair<std::string, ClientRef>(clientKey, newClient));
+    client = clientRefs.find(clientKey);
 
     printf("[QUIC] New client registered. (token: %s)\n", hexStr((char*)token, token_len).c_str());
   }
 
   // Send over all messages to quiche to handle quiche implementation.
   size_t done = quiche_conn_recv(client->second.quiche_ref, (uint8_t*)pBuffer, recvLength);
-
-/*
-  // Check if client is finally ready.
-  auto isEstablished = quiche_conn_is_established(client->second.quiche_ref);
-  auto isEarlyStage = quiche_conn_is_in_early_data(client->second.quiche_ref);
-  if (isEstablished || isEarlyStage) {
-    */
-    // Printf
-
-
-    // Handle all data that has to be sent over.
-    /*
-    quiche_stream_iter *writeable = quiche_conn_writable(client->second.quiche_ref);
-    uint64_t id = 0;
-
-    while (quiche_stream_iter_next(writeable, &id)) {
-      bool finish = false;
-      size_t recv_len = quiche_conn_stream_send(client->second.quiche_ref, id, pSendBuffer, sizeof(pSendBuffer), &finish);
-    }
-    quiche_stream_iter_free(writeable);
-    */
-
-    // Handle all data that has been received. 
-    // TODO: not needed yet.
-  //}
 }
 
 

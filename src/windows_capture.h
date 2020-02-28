@@ -47,7 +47,7 @@ class WindowsCapturer {
     bool initialize();
     void cleanup();
     
-    void captureFrame();
+    std::vector<std::vector<uint8_t>>* captureFrame();
     void debugLastFrame();
     void debugSession();
 };
